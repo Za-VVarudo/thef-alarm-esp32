@@ -61,8 +61,10 @@ class MqttClient {
             client.publish(getShadowTopic.c_str(), "{}");
         }
 
-        void requestUploadUrl(String requestUploadUrlTopic) {
-
+        void syncDevideShadow(JsonDocument& delta, String shadowUpdateTopic) {
+            String jsonData;
+            serializeJson(delta, jsonData);
+            client.publish(shadowUpdateTopic.c_str(), jsonData.c_str());
         }
 
         void publishEventData(JsonDocument& event) {

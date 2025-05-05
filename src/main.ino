@@ -18,6 +18,7 @@ const int TOPIC_LENGTH = 2;
 String deltaTopic = "$aws/things/" + THING_NAME + "/shadow/name/config/update/delta";
 String getSubscribeTopic = "$aws/things/" + THING_NAME + "/shadow/name/config/get/accepted";
 String getPublishTopic = "$aws/things/" + THING_NAME + "/shadow/name/config/get";
+String updatePublishTopic = "$aws/things/" + THING_NAME + "/shadow/name/config/update";
 
 String subscribeTopics[TOPIC_LENGTH]= {
   deltaTopic,
@@ -57,6 +58,7 @@ int doorPressureDetectCountdown = 0;
 int distance_threshold = 50;
 int alarm_max_duration = 1500;
 int pressure_threshold = 2100;
+double camera_angle = 0;
 
 void setup()
 {
@@ -151,11 +153,22 @@ void handleDeltaCallBack(char* topic, byte* payload, unsigned int length) {
   }
 
   if (getSubscribeTopic.equals(topic)) {
-    delta = doc["state"]["delta"];
+    JsonDocument reported = doc["state"]["reported"];
+    if (doc["state"]["delta"].is<JsonObject>()) {
+      merge(reported, doc["state"]["delta"]);
+    }
+    delta = reported;
+  }
+
+  if (delta.is<JsonObject>()) {
+    JsonDocument state;
+    state["state"]["desired"] = nullptr;
+    state["state"]["reported"] = delta;
+    // Clear state and sync to reported.
+    mqttClient.syncDevideShadow(state, updatePublishTopic);
   }
   
   serializeJson(delta, Serial);
-  
   Serial.println();
 
   if (delta["light"]["turned_on"].is<bool>()) {
@@ -163,6 +176,7 @@ void handleDeltaCallBack(char* topic, byte* payload, unsigned int length) {
   }
 
   if (delta["camera"]["angle"].is<double>()) {
+    camera_angle = delta["camera"]["angle"];
     cameraServo.write(delta["camera"]["angle"]);
   }
 
@@ -195,12 +209,11 @@ void resetCountDown()
 }
 
 int readCameraAngle() {
-  int cameraAngle = cameraServo.read();
-  if (cameraAngle < 0) return 0;
+  if (camera_angle < 0) return 0;
 
-  if (cameraAngle > 180) return 180;
+  if (camera_angle > 180) return 180;
 
-  return cameraAngle;
+  return camera_angle;
 }
 
 double calculateDistance() {
@@ -245,7 +258,15 @@ void ProcessDetecting()
     double detectedPressure = pressureDetector.get_units() * 2.381; // in grams
     if (detectedPressure > pressure_threshold) {     
       digitalWrite(LED_PIN, HIGH);
-      tone(BUZZER_PIN, 222, alarm_max_duration);
+      
+      int i = alarm_max_duration;
+      while (i > 0) {
+        i-=10;
+        digitalWrite(BUZZER_PIN, HIGH);
+        delay(10);
+        digitalWrite(BUZZER_PIN, LOW);
+      }
+
       Serial.print("Alarm fired. Pressure = ");
       Serial.println(detectedPressure);
 
@@ -257,14 +278,15 @@ void ProcessDetecting()
 
   if (eventDetected) {
     uuid.generate();
-    const char* eventImageName = uuid.toCharArray();
+    const char* eventId = uuid.toCharArray();
     // send event data to MQTT
+    event["event_id"] = eventId;
     event["camera_angle"] = readCameraAngle();
     event["device_name"] = THING_NAME;
     event["light_turned_on"] = digitalRead(LED_PIN);
-    event["image_prefix"] = "event-image/" + THING_NAME + "/" + (int)EventType::DOOR_PRESSURE_DETECTED + "/" + eventImageName + ".jpg";
+    event["image_prefix"] = "event-image/" + THING_NAME + "/" + (int)EventType::DOOR_PRESSURE_DETECTED + "/" + eventId + ".jpg";
 
-    sendEventImage(eventImageName);
+    sendEventImage(eventId);
     mqttClient.publishEventData(event);
   }
 
@@ -278,4 +300,22 @@ void sendEventImage(const char* imageName) {
   int actualLength = base64_decode_chars(imageBase64, 5112, output);
   mqttClient.publishEventImage(imageName, (byte*)output, 3833);
   free(output);
+}
+
+void merge(JsonVariant dst, JsonVariantConst src)
+{
+  if (src.is<JsonObjectConst>())
+  {
+    for (JsonPairConst kvp : src.as<JsonObjectConst>())
+    {
+      if (dst[kvp.key()]) 
+        merge(dst[kvp.key()], kvp.value());
+      else
+        dst[kvp.key()] = kvp.value();
+    }
+  }
+  else
+  {
+    dst.set(src);
+  }
 }
